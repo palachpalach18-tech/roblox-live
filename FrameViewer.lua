@@ -10,8 +10,8 @@ local player    = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
 local RAW_BASE      = "https://raw.githubusercontent.com/palachpalach18-tech/roblox-live/main"
-local FRAME_BUFFER  = 60
-local FPS           = 10
+local FRAME_BUFFER  = 10
+local FPS           = 1
 local POLL_INTERVAL = 1
 local TMP_DIR       = "live_tmp"
 local PREFETCH      = 3
