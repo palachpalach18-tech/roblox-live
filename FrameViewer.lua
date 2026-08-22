@@ -12,7 +12,7 @@ local playerGui  = player:WaitForChild("PlayerGui")
 -- ===== SETTINGS (must match Python script) =====
 local RAW_BASE      = "https://raw.githubusercontent.com/palachpalach18-tech/roblox-live/main"
 local FRAME_BUFFER  = 60
-local FPS           = 10
+local FPS           = 1
 local POLL_INTERVAL = 2        -- seconds between manifest checks
 local LOCAL_DIR     = "rblx_live"
 local LAYER_COUNT   = 5        -- ImageLabel layers for smooth overlap
