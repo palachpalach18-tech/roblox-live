@@ -6,14 +6,24 @@ local HttpService = game:GetService("HttpService")
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
+-- ============================================================
+-- CONFIG (auto-generated — do not edit manually)
+-- ============================================================
 local RAW_BASE      = "https://raw.githubusercontent.com/palachpalach18-tech/roblox-live/main"
 local LOCAL_DIR     = "roblox_live"
 local FPS           = 10
 local FRAME_BUFFER  = 60
-local POLL_INTERVAL = 2  -- seconds between manifest checks
+local FRAME_TIME    = 0.1
+local POLL_INTERVAL = 2
 local LAYERS        = 5
+local SHOW_DEBUG    = true
+-- ============================================================
 
-local FRAME_TIME    = 1 / FPS
+local startClock = os.clock()
+local function dbg(fmt, ...)
+    if not SHOW_DEBUG then return end
+    print(string.format("[%.2fs] " .. fmt, os.clock() - startClock, ...))
+end
 
 local function httpGet(url)
     local ok, result
@@ -60,23 +70,39 @@ for L = 1, LAYERS do
 end
 
 local statusLabel = Instance.new("TextLabel")
-statusLabel.Size = UDim2.fromOffset(400, 24)
-statusLabel.Position = UDim2.new(0.5, -200, 0, 8)
+statusLabel.Size = UDim2.fromOffset(500, 24)
+statusLabel.Position = UDim2.new(0.5, -250, 0, 8)
 statusLabel.BackgroundTransparency = 1
 statusLabel.TextColor3 = Color3.fromRGB(255, 255, 0)
 statusLabel.TextStrokeTransparency = 0
 statusLabel.Font = Enum.Font.Code
 statusLabel.TextSize = 16
-statusLabel.Text = "Connecting..."
+statusLabel.Text = "Connecting to live stream..."
 statusLabel.ZIndex = 100
 statusLabel.Parent = screenGui
 
--- ===== Asset cache =====
-local assets = {}   -- [slot] = rbxasset URI
-local FRONT_Z = 10
+local debugLabel = Instance.new("TextLabel")
+debugLabel.Size = UDim2.fromOffset(400, 100)
+debugLabel.Position = UDim2.new(0.5, -200, 1, -110)
+debugLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+debugLabel.BackgroundTransparency = 0.5
+debugLabel.BorderSizePixel = 0
+debugLabel.TextColor3 = Color3.fromRGB(0, 255, 120)
+debugLabel.Font = Enum.Font.Code
+debugLabel.TextSize = 13
+debugLabel.TextXAlignment = Enum.TextXAlignment.Left
+debugLabel.TextYAlignment = Enum.TextYAlignment.Top
+debugLabel.Text = "Debug info..."
+debugLabel.ZIndex = 100
+debugLabel.Visible = SHOW_DEBUG
+debugLabel.Parent = screenGui
 
-local function slotFor(frame)
-    return ((frame - 1) % LAYERS) + 1
+-- ===== Asset cache =====
+local assets   = {}
+local FRONT_Z  = 10
+
+local function slotFor(s)
+    return ((s - 1) % LAYERS) + 1
 end
 
 local function ensureAsset(slot)
@@ -99,63 +125,76 @@ local function setSlot(slot)
     end
 end
 
--- ===== Frame downloader =====
-local downloaded = {}  -- [slot] = true
+-- ===== Downloader =====
+local downloaded = {}
+local downloading = {}
 
 local function downloadFrame(slot)
-    if downloaded[slot] then return end
-    local url  = RAW_BASE .. "/frames/f" .. slot .. ".jpg"
-    local path = LOCAL_DIR .. "/f" .. slot .. ".jpg"
-    local ok, body = httpGet(url)
-    if ok then
-        writefile(path, body)
-        assets[slot] = nil  -- invalidate cache so it reloads
-        downloaded[slot] = true
-    end
+    if downloaded[slot] or downloading[slot] then return end
+    downloading[slot] = true
+    task.spawn(function()
+        local url  = RAW_BASE .. "/frames/f" .. slot .. ".jpg"
+        local path = LOCAL_DIR .. "/f" .. slot .. ".jpg"
+        local ok, body = httpGet(url)
+        if ok and body and #body > 0 then
+            writefile(path, body)
+            assets[slot] = nil  -- invalidate so getcustomasset reloads
+            downloaded[slot] = true
+            dbg("f%d downloaded (%d bytes)", slot, #body)
+        else
+            downloading[slot] = false  -- allow retry
+        end
+    end)
 end
 
 -- ===== Manifest poller =====
 local serverTotal  = 0
-local serverSlot   = 1
+local serverSlot   = 0
 local lastPoll     = 0
+local downloadedCount = 0
 
 local function pollManifest()
     local now = os.clock()
     if now - lastPoll < POLL_INTERVAL then return end
     lastPoll = now
 
-    local ok, body = httpGet(RAW_BASE .. "/manifest.json")
-    if not ok then return end
+    task.spawn(function()
+        local ok, body = httpGet(RAW_BASE .. "/manifest.json")
+        if not ok or not body then return end
 
-    local ok2, data = pcall(function()
-        return HttpService:JSONDecode(body)
+        local ok2, data = pcall(HttpService.JSONDecode, HttpService, body)
+        if not ok2 or not data then return end
+
+        serverTotal = data.total or serverTotal
+        serverSlot  = data.slot  or serverSlot
+
+        -- Prefetch upcoming slots
+        for ahead = 0, LAYERS do
+            local slot = ((serverSlot - 1 + ahead) % FRAME_BUFFER) + 1
+            downloadFrame(slot)
+        end
+
+        -- Count downloads
+        downloadedCount = 0
+        for _ in pairs(downloaded) do
+            downloadedCount += 1
+        end
+
+        dbg("Manifest: total=%d slot=%d cached=%d", serverTotal, serverSlot, downloadedCount)
     end)
-    if not ok2 or not data then return end
-
-    serverTotal = data.total or serverTotal
-    serverSlot  = data.slot  or serverSlot
-
-    -- Download next few frames ahead in parallel
-    for ahead = 0, math.min(LAYERS, FRAME_BUFFER - 1) do
-        local slot = ((serverSlot - 1 + ahead) % FRAME_BUFFER) + 1
-        task.spawn(downloadFrame, slot)
-    end
-
-    statusLabel.Text = string.format(
-        "LIVE — server frame %d | slot %d",
-        serverTotal, serverSlot
-    )
 end
 
 -- ===== Playback =====
-local currentFrame    = 1
-local nextSwitchTime  = os.clock() + FRAME_TIME
-local advPerSec       = 0
-local fpsWindowStart  = os.clock()
+local currentFrame   = 1
+local nextSwitch     = os.clock() + FRAME_TIME
+local advPerSec      = 0
+local skippedTotal   = 0
+local fpsWindow      = os.clock()
+local playbackStart  = os.clock()
 
--- Preload initial slots
-for slot = 1, FRAME_BUFFER do
-    task.spawn(downloadFrame, slot)
+-- Download first batch
+for slot = 1, math.min(LAYERS * 2, FRAME_BUFFER) do
+    downloadFrame(slot)
 end
 
 local conn
@@ -165,35 +204,48 @@ conn = RunService.Heartbeat:Connect(function()
         return
     end
 
-    -- Poll manifest periodically
     pollManifest()
 
     local now = os.clock()
-    if now < nextSwitchTime then return end
+    if now < nextSwitch then return end
 
     local prev = currentFrame
-    while now >= nextSwitchTime do
-        nextSwitchTime += FRAME_TIME
+    local advances = 0
+
+    while now >= nextSwitch do
+        nextSwitch  += FRAME_TIME
         currentFrame = (currentFrame % FRAME_BUFFER) + 1
-        advPerSec   += 1
+        advances    += 1
     end
 
-    -- Prime next frame
+    advPerSec += advances
+    if advances > 1 then
+        skippedTotal += advances - 1
+    end
+
+    -- Prefetch ahead
     local nextSlot = (currentFrame % FRAME_BUFFER) + 1
-    task.spawn(downloadFrame, nextSlot)
+    downloadFrame(nextSlot)
 
     setSlot(currentFrame)
-
     labels[slotFor(currentFrame)].ZIndex = FRONT_Z
     labels[slotFor(prev)].ZIndex = slotFor(prev)
 
     local now2 = os.clock()
-    if now2 - fpsWindowStart >= 1 then
-        statusLabel.Text = string.format(
-            "LIVE — %d fps | server frame %d",
-            advPerSec, serverTotal
-        )
-        advPerSec    = 0
-        fpsWindowStart = now2
+    if now2 - fpsWindow >= 1 then
+        local uptime = now2 - playbackStart
+        statusLabel.Text = string.format("LIVE  %d fps  |  server frame %d", advPerSec, serverTotal)
+        if SHOW_DEBUG then
+            debugLabel.Text = string.format(
+                "Slot: %d / %d  |  Server slot: %d\nDownloaded: %d / %d\nSkipped total: %d\nUptime: %.0fs",
+                currentFrame, FRAME_BUFFER,
+                serverSlot,
+                downloadedCount, FRAME_BUFFER,
+                skippedTotal,
+                uptime
+            )
+        end
+        advPerSec = 0
+        fpsWindow = now2
     end
 end)
